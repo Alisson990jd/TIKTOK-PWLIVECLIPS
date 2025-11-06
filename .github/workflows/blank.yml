@@ -8,11 +8,11 @@ on:
         required: true
         type: string
       inicio:
-        description: 'Tempo de início em segundos'
+        description: 'Tempo de início (HH:MM:SS ou MM:SS)'
         required: true
         type: string
       fim:
-        description: 'Tempo de fim em segundos'
+        description: 'Tempo de fim (HH:MM:SS ou MM:SS)'
         required: true
         type: string
       senha:
@@ -84,6 +84,18 @@ jobs:
                       os.remove(filename)
                   except:
                       pass
+
+          def time_to_seconds(time_str):
+              """Converte tempo HH:MM:SS ou MM:SS para segundos"""
+              parts = time_str.strip().split(':')
+              if len(parts) == 3:
+                  h, m, s = map(int, parts)
+                  return h * 3600 + m * 60 + s
+              elif len(parts) == 2:
+                  m, s = map(int, parts)
+                  return m * 60 + s
+              else:
+                  return int(time_str)
 
           def format_time(seconds):
               """Formata segundos para HH:MM:SS"""
@@ -429,8 +441,8 @@ jobs:
                   sys.exit(1)
               
               url = sys.argv[1]
-              start_time = int(sys.argv[2])
-              end_time = int(sys.argv[3])
+              start_time = time_to_seconds(sys.argv[2])
+              end_time = time_to_seconds(sys.argv[3])
               
               success = download_segment(url, start_time, end_time)
               sys.exit(0 if success else 1)
