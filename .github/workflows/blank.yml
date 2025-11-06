@@ -1,4 +1,4 @@
-name: Download Segmento de Live
+name: Download Segmento de Live e Upload TikTok
 
 on:
   workflow_dispatch:
@@ -15,13 +15,17 @@ on:
         description: 'Tempo de fim (HH:MM:SS ou MM:SS)'
         required: true
         type: string
+      descricao:
+        description: 'Descrição do vídeo para TikTok (com hashtags)'
+        required: true
+        type: string
       senha:
         description: 'Senha de autorização'
         required: true
         type: string
 
 jobs:
-  download-and-test:
+  download-and-upload:
     runs-on: ubuntu-latest
     
     steps:
@@ -33,7 +37,7 @@ jobs:
           fi
           echo "✅ Senha validada com sucesso"
       
-      - name: Instalar Dependências
+      - name: Instalar Dependências Base
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3 python3-pip git
@@ -382,7 +386,7 @@ jobs:
                   
                   # Para Kick, usar KickAPI como método primário
                   if platform == 'kick':
-                      logging.info("[P%d] 🔥 Método 1: KickAPI + ffmpeg", process_id)
+                      logging.info("[P%d] 📥 Método 1: KickAPI + ffmpeg", process_id)
                       success = _download_with_kickapi(url, filename, start_time, end_time, config, process_id)
                       
                       if success and os.path.exists(filename):
@@ -393,7 +397,7 @@ jobs:
                           else:
                               cleanup_file(filename)
                   
-                  logging.info("[P%d] 🔥 Método %d: yt-dlp + ffmpeg", process_id, 2 if platform == 'kick' else 1)
+                  logging.info("[P%d] 📥 Método %d: yt-dlp + ffmpeg", process_id, 2 if platform == 'kick' else 1)
                   success = _download_with_ytdlp_robust(url, filename, start_time, end_time, config, process_id)
                   
                   if success and os.path.exists(filename):
@@ -404,7 +408,7 @@ jobs:
                       else:
                           cleanup_file(filename)
                   
-                  logging.info("[P%d] 🔥 Método %d: yt-dlp download-sections", process_id, 3 if platform == 'kick' else 2)
+                  logging.info("[P%d] 📥 Método %d: yt-dlp download-sections", process_id, 3 if platform == 'kick' else 2)
                   success = _download_with_ytdlp_direct(url, filename, start_time, end_time, config, process_id)
                   
                   if success and os.path.exists(filename):
@@ -416,7 +420,7 @@ jobs:
                           cleanup_file(filename)
                   
                   if platform == 'kick':
-                      logging.info("[P%d] 🔥 Método 4: streamlink + ffmpeg", process_id)
+                      logging.info("[P%d] 📥 Método 4: streamlink + ffmpeg", process_id)
                       success = _download_with_streamlink(url, filename, start_time, end_time, config, process_id)
                       
                       if success and os.path.exists(filename):
@@ -473,9 +477,56 @@ jobs:
             echo "⚠️ Arquivo teste.py não encontrado"
           fi
       
-      - name: Upload do Vídeo Final
+      - name: Instalar Dependências do TikTok Uploader
+        run: |
+          echo "📦 Instalando Playwright e dependências..."
+          pip3 install playwright
+          playwright install firefox
+          playwright install-deps firefox
+          echo "✅ Dependências instaladas"
+      
+      - name: Criar Arquivo de Descrição
+        run: |
+          echo "📝 Criando arquivo desc.txt..."
+          echo "${{ inputs.descricao }}" > desc.txt
+          echo "✅ Descrição salva:"
+          cat desc.txt
+      
+      - name: Verificar Arquivo de Upload
+        run: |
+          if [ ! -f "up.py" ]; then
+            echo "❌ Arquivo up.py não encontrado!"
+            exit 1
+          fi
+          
+          if [ ! -f "cookies.txt" ]; then
+            echo "⚠️ Arquivo cookies.txt não encontrado!"
+            echo "❌ O upload não poderá ser realizado sem cookies"
+            exit 1
+          fi
+          
+          if [ ! -f "video_final.mp4" ]; then
+            echo "❌ Arquivo video_final.mp4 não encontrado!"
+            exit 1
+          fi
+          
+          echo "✅ Todos os arquivos necessários estão presentes"
+          ls -lh video_final.mp4
+      
+      - name: Upload para TikTok
+        run: |
+          echo "🚀 Iniciando upload para TikTok..."
+          python3 up.py -video video_final.mp4
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Upload concluído com sucesso!"
+          else
+            echo "⚠️ Upload pode ter falhado - verifique os logs acima"
+          fi
+      
+      - name: Upload do Vídeo Final (Backup)
         uses: actions/upload-artifact@v4
-        if: success()
+        if: always()
         with:
           name: video-final
           path: video_final.mp4
