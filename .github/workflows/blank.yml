@@ -480,10 +480,11 @@ jobs:
       - name: Instalar Dependências do TikTok Uploader
         run: |
           echo "📦 Instalando Playwright e dependências..."
+          sudo apt-get install -y xvfb
           pip3 install playwright
           playwright install firefox
           playwright install-deps firefox
-          echo "✅ Dependências instaladas"
+          echo "✅ Dependências instaladas (incluindo Xvfb)"
       
       - name: Criar Arquivo de Descrição
         run: |
@@ -516,7 +517,7 @@ jobs:
       - name: Upload para TikTok
         run: |
           echo "🚀 Iniciando upload para TikTok..."
-          python3 up.py -video video_final.mp4
+          xvfb-run python3 up.py -video video_final.mp4
           
           if [ $? -eq 0 ]; then
             echo "✅ Upload concluído com sucesso!"
