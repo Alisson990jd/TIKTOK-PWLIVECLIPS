@@ -42,25 +42,27 @@ jobs:
       - name: Baixar Arquivos da Pasta tktk
         env:
           GH_TOKEN: ${{ secrets.TOKEN }}
-          TKTK_URL: ${{ secrets.TKTK }}
         run: |
           echo "📥 Baixando arquivos da pasta tktk..."
           
-          # Extrair informações do URL
-          REPO_PATH=$(echo "$TKTK_URL" | sed 's|https://github.com/||' | sed 's|/tree/main/||')
-          OWNER_REPO=$(echo "$REPO_PATH" | cut -d'/' -f1-2)
-          
           # Clonar apenas a pasta específica usando sparse checkout
-          git clone --filter=blob:none --sparse https://${GH_TOKEN}@github.com/${OWNER_REPO}.git repo_temp
+          git clone --filter=blob:none --sparse https://${GH_TOKEN}@github.com/Alisson990jd/apiss.git repo_temp
           cd repo_temp
           git sparse-checkout set tktk
           
           # Copiar arquivos para o diretório de trabalho
-          cp -r tktk/* ../
+          if [ -d "tktk" ]; then
+            cp -r tktk/* ../
+            echo "✅ Arquivos baixados com sucesso"
+          else
+            echo "❌ Pasta tktk não encontrada"
+            exit 1
+          fi
+          
           cd ..
           rm -rf repo_temp
           
-          echo "✅ Arquivos baixados com sucesso"
+          echo "📂 Arquivos no diretório:"
           ls -la
       
       - name: Criar Script de Download
