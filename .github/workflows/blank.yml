@@ -1,0 +1,468 @@
+name: Download Segmento de Live
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'URL da live (Twitch ou Kick)'
+        required: true
+        type: string
+      inicio:
+        description: 'Tempo de início em segundos'
+        required: true
+        type: string
+      fim:
+        description: 'Tempo de fim em segundos'
+        required: true
+        type: string
+      senha:
+        description: 'Senha de autorização'
+        required: true
+        type: string
+
+jobs:
+  download-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validar Senha
+        run: |
+          if [ "${{ inputs.senha }}" != "${{ secrets.SENHA }}" ]; then
+            echo "❌ Senha inválida! Workflow não autorizado."
+            exit 1
+          fi
+          echo "✅ Senha validada com sucesso"
+      
+      - name: Instalar Dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3 python3-pip git
+          pip3 install yt-dlp streamlink kickapi
+          
+      - name: Baixar Arquivos da Pasta tktk
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+          TKTK_URL: ${{ secrets.TKTK }}
+        run: |
+          echo "📥 Baixando arquivos da pasta tktk..."
+          
+          # Extrair informações do URL
+          REPO_PATH=$(echo "$TKTK_URL" | sed 's|https://github.com/||' | sed 's|/tree/main/||')
+          OWNER_REPO=$(echo "$REPO_PATH" | cut -d'/' -f1-2)
+          
+          # Clonar apenas a pasta específica usando sparse checkout
+          git clone --filter=blob:none --sparse https://${GH_TOKEN}@github.com/${OWNER_REPO}.git repo_temp
+          cd repo_temp
+          git sparse-checkout set tktk
+          
+          # Copiar arquivos para o diretório de trabalho
+          cp -r tktk/* ../
+          cd ..
+          rm -rf repo_temp
+          
+          echo "✅ Arquivos baixados com sucesso"
+          ls -la
+      
+      - name: Criar Script de Download
+        run: |
+          cat > download_segment.py << 'EOFPYTHON'
+          import subprocess
+          import os
+          import sys
+          import logging
+          import shutil
+          import re
+
+          logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+          def cleanup_file(filename):
+              """Remove arquivo se existir"""
+              if os.path.exists(filename):
+                  try:
+                      os.remove(filename)
+                  except:
+                      pass
+
+          def format_time(seconds):
+              """Formata segundos para HH:MM:SS"""
+              h = int(seconds // 3600)
+              m = int((seconds % 3600) // 60)
+              s = int(seconds % 60)
+              return f"{h:02d}:{m:02d}:{s:02d}"
+
+          def detect_platform(url):
+              """Detecta a plataforma do vídeo"""
+              url_lower = url.lower()
+              if 'twitch.tv' in url_lower:
+                  return 'twitch'
+              elif 'kick.com' in url_lower:
+                  return 'kick'
+              return 'unknown'
+
+          def get_platform_info(url):
+              """Obtém informações específicas da plataforma"""
+              platform = detect_platform(url)
+              
+              platform_configs = {
+                  'twitch': {
+                      'name': 'Twitch',
+                      'emoji': '🟣',
+                      'format_preference': 'best[height<=1080][fps<=60]/best[height<=1080]/best',
+                      'timeout': 900,
+                      'retry_count': 3
+                  },
+                  'kick': {
+                      'name': 'Kick',
+                      'emoji': '🟢',
+                      'format_preference': 'best[height<=1080]/best',
+                      'timeout': 1200,
+                      'retry_count': 5
+                  },
+                  'unknown': {
+                      'name': 'Desconhecida',
+                      'emoji': '❓',
+                      'format_preference': 'best',
+                      'timeout': 900,
+                      'retry_count': 3
+                  }
+              }
+              
+              return platform, platform_configs.get(platform, platform_configs['unknown'])
+
+          def _download_with_kickapi(url, filename, start_time, end_time, config, process_id):
+              """Método específico para Kick usando KickAPI para obter stream URL"""
+              try:
+                  from kickapi import KickAPI
+                  
+                  duration = end_time - start_time
+                  
+                  # Extrair ID do vídeo
+                  video_id_match = re.search(r'/videos?/([a-f0-9\-]+)', url, re.IGNORECASE)
+                  if not video_id_match:
+                      logging.warning("[P%d] Não foi possível extrair ID do vídeo Kick", process_id)
+                      return False
+                  
+                  video_id = video_id_match.group(1)
+                  logging.info("[P%d] 🟢 Kick: Obtendo stream URL para vídeo %s", process_id, video_id[:8])
+                  
+                  kick_api = KickAPI()
+                  video = kick_api.video(video_id)
+                  
+                  if not video or not video.stream:
+                      logging.warning("[P%d] Não foi possível obter stream URL do Kick", process_id)
+                      return False
+                  
+                  stream_url = video.stream
+                  logging.info("[P%d] ✓ Stream URL obtida via KickAPI", process_id)
+                  
+                  # Usar ffmpeg para baixar o segmento específico
+                  cmd_download = [
+                      'ffmpeg',
+                      '-ss', str(start_time),
+                      '-i', stream_url,
+                      '-t', str(duration),
+                      '-c', 'copy',
+                      '-avoid_negative_ts', 'make_zero',
+                      '-loglevel', 'warning',
+                      '-y',
+                      filename
+                  ]
+                  
+                  result = subprocess.run(cmd_download, capture_output=True, text=True, timeout=180)
+                  
+                  if result.returncode != 0:
+                      logging.warning("[P%d] ffmpeg stderr: %s", process_id, result.stderr[:500])
+                      cleanup_file(filename)
+                      return False
+                  
+                  if os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          logging.info("[P%d] ✅ Download via KickAPI bem-sucedido", process_id)
+                          return True
+                      else:
+                          cleanup_file(filename)
+                          return False
+                  
+                  return False
+                  
+              except Exception as e:
+                  logging.warning("[P%d] Download via KickAPI falhou: %s", process_id, e)
+                  cleanup_file(filename)
+                  return False
+
+          def _download_with_ytdlp_robust(url, filename, start_time, end_time, config, process_id):
+              """Método de download robusto com yt-dlp"""
+              try:
+                  duration = end_time - start_time
+                  
+                  logging.info("[P%d] 🎯 Obtendo URL do stream...", process_id)
+                  
+                  cmd_get_url = [
+                      'yt-dlp',
+                      '--format', config['format_preference'],
+                      '--get-url',
+                      '--no-playlist',
+                  ]
+                  
+                  if 'kick' in url.lower():
+                      logging.info("[P%d] 🕵️ Usando --impersonate chrome para Kick", process_id)
+                      cmd_get_url.extend(['--impersonate', 'chrome'])
+                  
+                  cmd_get_url.append(url)
+                  
+                  result = subprocess.run(cmd_get_url, capture_output=True, text=True, timeout=240)
+                  
+                  if result.returncode != 0 or not result.stdout.strip():
+                      logging.warning("[P%d] Falha ao obter URL: %s", process_id, result.stderr[:300])
+                      return False
+                  
+                  stream_url = result.stdout.strip().split('\n')[0]
+                  logging.info("[P%d] ✓ URL obtida, baixando segmento...", process_id)
+                  
+                  cmd_download = [
+                      'ffmpeg',
+                      '-ss', str(start_time),
+                      '-i', stream_url,
+                      '-t', str(duration),
+                      '-c', 'copy',
+                      '-avoid_negative_ts', 'make_zero',
+                      '-loglevel', 'warning',
+                      '-y',
+                      filename
+                  ]
+                  
+                  result = subprocess.run(cmd_download, capture_output=True, text=True, timeout=180)
+                  
+                  if result.returncode != 0:
+                      logging.warning("[P%d] ffmpeg stderr: %s", process_id, result.stderr[:500])
+                      cleanup_file(filename)
+                      return False
+                  
+                  if os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          return True
+                      else:
+                          cleanup_file(filename)
+                          return False
+                          
+                  return False
+                  
+              except Exception as e:
+                  logging.warning("[P%d] Download direto falhou: %s", process_id, e)
+                  cleanup_file(filename)
+                  return False
+
+          def _download_with_ytdlp_direct(url, filename, start_time, end_time, config, process_id):
+              """Método alternativo: baixar com yt-dlp usando download-sections"""
+              try:
+                  cmd = [
+                      'yt-dlp',
+                      '--format', config['format_preference'],
+                      '--download-sections', f'*{start_time}-{end_time}',
+                      '-o', filename,
+                      '--no-part',
+                      '--no-playlist',
+                      '--retries', '3',
+                      '--fragment-retries', '3',
+                      '--socket-timeout', '60',
+                  ]
+                  
+                  if 'kick' in url.lower():
+                      cmd.extend(['--impersonate', 'chrome'])
+                      
+                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+                  
+                  if result.returncode != 0:
+                      logging.warning("[P%d] yt-dlp direct stderr: %s", process_id, result.stderr[:500])
+                      cleanup_file(filename)
+                      return False
+                  
+                  if os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          return True
+                      else:
+                          cleanup_file(filename)
+                          return False
+                          
+                  return False
+                  
+              except Exception as e:
+                  logging.warning("[P%d] Download direto falhou: %s", process_id, e)
+                  cleanup_file(filename)
+                  return False
+
+          def _download_with_streamlink(url, filename, start_time, end_time, config, process_id):
+              """Método fallback com streamlink"""
+              try:
+                  duration = end_time - start_time
+                  
+                  cmd_get_url = ['streamlink', '--stream-url', url, 'best']
+                  result = subprocess.run(cmd_get_url, capture_output=True, text=True, timeout=60)
+                  
+                  if result.returncode != 0 or not result.stdout.strip():
+                      logging.warning("[P%d] Streamlink não conseguiu obter URL", process_id)
+                      return False
+                  
+                  stream_url = result.stdout.strip()
+                  
+                  if not stream_url.startswith('http'):
+                      logging.warning("[P%d] URL inválida do streamlink: %s", process_id, stream_url[:100])
+                      return False
+                  
+                  cmd_download = [
+                      'ffmpeg',
+                      '-ss', str(start_time),
+                      '-i', stream_url,
+                      '-t', str(duration),
+                      '-c', 'copy',
+                      '-avoid_negative_ts', 'make_zero',
+                      '-loglevel', 'warning',
+                      '-y',
+                      filename
+                  ]
+                  
+                  result = subprocess.run(cmd_download, capture_output=True, text=True, timeout=180)
+                  
+                  if result.returncode != 0:
+                      logging.warning("[P%d] Streamlink ffmpeg stderr: %s", process_id, result.stderr[:400])
+                      cleanup_file(filename)
+                      return False
+                  
+                  if os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          return True
+                      else:
+                          cleanup_file(filename)
+                          return False
+                          
+                  return False
+                  
+              except Exception as e:
+                  logging.warning("[P%d] Streamlink falhou: %s", process_id, e)
+                  cleanup_file(filename)
+                  return False
+
+          def download_segment(url, start_time, end_time, filename="principal.mp4"):
+              """Baixa um segmento específico do vídeo"""
+              platform, config = get_platform_info(url)
+              process_id = 1
+              
+              try:
+                  duration = end_time - start_time
+                  
+                  logging.info("[P%d] %s Baixando segmento: %s - %s (%.1f min) (%s)", 
+                              process_id, config['emoji'], 
+                              format_time(start_time), format_time(end_time), 
+                              duration/60, config['name'])
+                  
+                  total, used, free = shutil.disk_usage("/")
+                  free_gb = free // (2**30)
+                  
+                  if free_gb < 2:
+                      logging.error("[P%d] ⚠️ Espaço insuficiente: %.2f GB", process_id, free_gb)
+                      return False
+                  
+                  # Para Kick, usar KickAPI como método primário
+                  if platform == 'kick':
+                      logging.info("[P%d] 🔥 Método 1: KickAPI + ffmpeg", process_id)
+                      success = _download_with_kickapi(url, filename, start_time, end_time, config, process_id)
+                      
+                      if success and os.path.exists(filename):
+                          file_size = os.path.getsize(filename)
+                          if file_size > 50000:
+                              logging.info("[P%d] ✅ Segmento baixado (%d bytes)", process_id, file_size)
+                              return True
+                          else:
+                              cleanup_file(filename)
+                  
+                  logging.info("[P%d] 🔥 Método %d: yt-dlp + ffmpeg", process_id, 2 if platform == 'kick' else 1)
+                  success = _download_with_ytdlp_robust(url, filename, start_time, end_time, config, process_id)
+                  
+                  if success and os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          logging.info("[P%d] ✅ Segmento baixado (%d bytes)", process_id, file_size)
+                          return True
+                      else:
+                          cleanup_file(filename)
+                  
+                  logging.info("[P%d] 🔥 Método %d: yt-dlp download-sections", process_id, 3 if platform == 'kick' else 2)
+                  success = _download_with_ytdlp_direct(url, filename, start_time, end_time, config, process_id)
+                  
+                  if success and os.path.exists(filename):
+                      file_size = os.path.getsize(filename)
+                      if file_size > 50000:
+                          logging.info("[P%d] ✅ Segmento baixado (%d bytes)", process_id, file_size)
+                          return True
+                      else:
+                          cleanup_file(filename)
+                  
+                  if platform == 'kick':
+                      logging.info("[P%d] 🔥 Método 4: streamlink + ffmpeg", process_id)
+                      success = _download_with_streamlink(url, filename, start_time, end_time, config, process_id)
+                      
+                      if success and os.path.exists(filename):
+                          file_size = os.path.getsize(filename)
+                          if file_size > 50000:
+                              logging.info("[P%d] ✅ Segmento baixado (%d bytes)", process_id, file_size)
+                              return True
+                          else:
+                              cleanup_file(filename)
+                  
+                  logging.error("[P%d] ❌ Falha em todos os métodos", process_id)
+                  return False
+                          
+              except Exception as e:
+                  logging.error("[P%d] ❌ Erro ao baixar segmento: %s", process_id, e)
+                  cleanup_file(filename)
+                  return False
+
+          if __name__ == "__main__":
+              if len(sys.argv) != 4:
+                  print("Uso: python download_segment.py <URL> <inicio> <fim>")
+                  sys.exit(1)
+              
+              url = sys.argv[1]
+              start_time = int(sys.argv[2])
+              end_time = int(sys.argv[3])
+              
+              success = download_segment(url, start_time, end_time)
+              sys.exit(0 if success else 1)
+          EOFPYTHON
+          
+          echo "✅ Script de download criado"
+      
+      - name: Baixar Segmento da Live
+        run: |
+          echo "🎬 Iniciando download do segmento..."
+          python3 download_segment.py "${{ inputs.link }}" "${{ inputs.inicio }}" "${{ inputs.fim }}"
+          
+          if [ -f "principal.mp4" ]; then
+            echo "✅ Download concluído com sucesso!"
+            ls -lh principal.mp4
+          else
+            echo "❌ Falha no download do segmento"
+            exit 1
+          fi
+      
+      - name: Executar Teste
+        run: |
+          if [ -f "teste.py" ]; then
+            echo "🧪 Executando teste.py..."
+            python3 teste.py
+            echo "✅ Teste executado com sucesso!"
+          else
+            echo "⚠️ Arquivo teste.py não encontrado"
+          fi
+      
+      - name: Upload do Vídeo
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: video-segmento
+          path: principal.mp4
+          retention-days: 7
