@@ -461,10 +461,10 @@ jobs:
             echo "⚠️ Arquivo teste.py não encontrado"
           fi
       
-      - name: Upload do Vídeo
+      - name: Upload do Vídeo Final
         uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: video-segmento
-          path: principal.mp4
+          name: video-final
+          path: video_final.mp4
           retention-days: 7
